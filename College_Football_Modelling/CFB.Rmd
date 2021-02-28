@@ -1,0 +1,543 @@
+---
+title: "Predictive Modeling of College Football Bowl Winner with Linear Regression, Random Forests and XGBoost in R"
+author: Igor Aboim 
+output:
+  md_document:
+    variant: markdown_github
+---
+
+# Predictive Modeling with Random Forests and XGBoost
+
+### Loading relevant packages
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(recipes)
+library(caret)
+library(ranger)
+library(vip)
+library(xgboost)
+```
+
+
+### Reading the dataset in CSV
+
+```{r}
+inFile <- "cfb_final.csv"
+cfb.random <- read.csv(inFile)
+```
+
+
+### Part 1 - Data Preparation, Wrangling and Preprocessing
+
+Picking up only the relevant variables
+a) your conference, opponent conference, and conference game variables.
+b) All continuous variable except for Spread, Victory
+```{r}
+columns_of_interest <- c(4, 7, 14, 23, 25:37, 39:53, 56, 58:70, 72:102, 107:113, 116)
+```
+
+Checking the Conf.Game variable
+
+```{r}
+with(cfb.random, table(Conf.Game))
+```
+
+Correcting some values
+
+```{r}
+cfb.random <- cfb.random %>%
+  mutate(
+    conf_game2 = ifelse(Conf.Game == "CCG" | Conf.Game == "Conf Champ", 
+                        "Y", 
+                        Conf.Game)
+  )
+```
+
+Inspecting the corrected variable (conf_game2)
+
+```{r}
+with(cfb.random, table(conf_game2))
+```
+
+Inspecting the Conference variable
+
+```{r}
+with(cfb.random, table(Conference))
+
+cfb.random[cfb.random$Conference == "Pac 12", "Conference"] <- "PAC 12"
+with(cfb.random, table(Conference))
+```
+
+Inspecting the Opp.Conference variable
+
+```{r}
+with(cfb.random, table(Opp.Conference))
+cfb.random[cfb.random$Opp.Conference == "Big 19", ]
+cfb.random[1472, "Team"]
+
+cfb.random[1472, "Opp.Conference"] <- "AAC"
+with(cfb.random, table(Opp.Conference))
+```
+
+Generating train and test data:
+```{r}
+cfb.train <- subset(cfb.random, Year < 2015)
+cfb.train <- subset(cfb.train, Team != 'UTSA' & Opp != 'UTSA')
+cfb.train <- cfb.train[, columns_of_interest]
+
+cfb.test <- subset(cfb.random, Year == 2015)
+cfb.test <- subset(cfb.test, Team != 'UTSA' & Opp != 'UTSA')
+cfb.test <- cfb.test[, columns_of_interest]
+```
+
+Preprocessing the data:
+1) Applied the Yeo-Johnson transformation to all continuous variables.
+2) Centered and scaled all continuous predictors.
+3) Created dummy variables for your conference, opponent conference, and conference game variables.
+
+```{r}
+cfb_recipe <- recipe(Pts.Diff ~ ., data = cfb.train) %>%
+  step_YeoJohnson(all_numeric()) %>%
+  step_center(all_predictors(), -all_nominal()) %>%
+  step_scale(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal())
+
+prepare_cfb <- prep(cfb_recipe, training = cfb.train)
+
+bake_cfb.train <- bake(prepare_cfb, new_data=cfb.train)
+
+bake_cfb.test <- bake(prepare_cfb, new_data=cfb.test)
+
+```
+
+### Part 2 - Base model (Linear Regression)
+
+1. Training data RMSE
+
+```{r, warning=F}
+base_model_train <- train(
+  Pts.Diff ~ .,
+  data = bake_cfb.train,
+  method = "lm"
+)
+train_rmse <- base_model_train$results$RMSE
+```
+
+2. Test data RMSE
+
+```{r}
+test.predict <- predict(base_model_train, bake_cfb.test)
+RMSE(test.predict, bake_cfb.test$Pts.Diff)
+
+```
+
+3. Converting the predicted outcome and the test data to a binary win/loss
+```{r}
+converted.prediction <- factor(ifelse(test.predict > 0, "win", "loss"))
+converted.test <- factor(ifelse(bake_cfb.test$Pts.Diff > 0, "win", "loss"))
+```
+4. Confusion Matrix
+```{r}
+confusionMatrix(converted.prediction, converted.test)
+```
+Reporting the accuracy of the base model
+
+### Part 3 - Random Forest Model
+
+Base Random Forest Model
+```{r base_rf}
+cfb.ranger.default <- ranger(Pts.Diff ~ ., data = bake_cfb.train)
+
+default.ranger.rmse <- sqrt(cfb.ranger.default$prediction.error)
+```
+
+#### Hyperparameter Tuning
+
+Now we see how hyperparameter tuning can improve our model fit. We tune $m_{try}$, the minimum node size, the fraction of observations that are sampled, and whether or not we sample with replacement. Note there are 120 combinations of tuning parameters! The top 10 models are output below, and you can use the output to estimate improvement over both the default ranger settings and the original linear model.
+
+```{r tune_rf}
+##Define hypergrid
+hyper_grid <- expand.grid(
+  mtry = floor((length(colnames(bake_cfb.train))-1) * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5, 10), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .75, 1)                                            
+)
+
+start_time <- Sys.time()
+
+##Full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  ##ith hyperparameter combination
+  fit <- ranger(
+    formula         = Pts.Diff ~ ., 
+    data            = bake_cfb.train, 
+    num.trees       = 10*length(length(colnames(bake_cfb.train))-1),
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+    num.threads     = 7
+  )
+  ##Save OOB error 
+  hyper_grid$rmse[i] <- sqrt(fit$prediction.error)
+}
+
+end_time <- Sys.time()
+
+##Time elapsed
+end_time - start_time
+
+##Top 10 models
+hyper_grid %>%
+  arrange(rmse) %>%
+  mutate(perc_gain = (train_rmse - rmse) / train_rmse * 100) %>%
+  head(5)
+```
+Fitting the final model and calculating the RMSE of it in test data
+```{r}
+  fit <- ranger(
+    formula         = Pts.Diff ~ ., 
+    data            = bake_cfb.train, 
+    num.trees       = 10*length(length(colnames(bake_cfb.train))-1),
+    mtry            = 43,
+    min.node.size   = 10,
+    replace         = TRUE,
+    sample.fraction = 1.00,
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+    importance      = 'impurity'
+  )
+rf.test.predict <- predict(fit,bake_cfb.test)
+RMSE(rf.test.predict$predictions, bake_cfb.test$Pts.Diff)
+```
+Reporting a simple confustion matrix on your converted predictions for the test data and the overall accuracy for your test data set.
+
+```{r}
+converted.rf.prediction <- factor(ifelse(rf.test.predict$predictions > 0, "win", "loss"))
+confusionMatrix(converted.rf.prediction, converted.test)
+```
+Providing a variable importance plot.
+
+```{r}
+vip(fit, num_features = 25, geom='point', aesthetics = list(color = "blue"))
+```
+### Part 4 - XGBoost Modelling
+
+```{r xgboost_prep}
+X <- as.matrix(bake_cfb.train)
+Y <- bake_cfb.train$Pts.Diff
+```
+
+#### Hyperparameter Tuning
+
+Step 1: Tune eta
+
+```{r eta, eval=F}
+hyper_grid1 <- expand.grid(
+  eta = c(0.3, 0.1, 0.05, 0.01, 0.005),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+for(i in seq_len(nrow(hyper_grid1))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid1$eta[i]
+    ) 
+  )
+  hyper_grid1$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid1$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid1 %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+eta = 0.01 had the best result in terms of RMSE.
+
+Step 2: Tune tree-specific hyperparameters
+
+The tree-specific hyperparameters are `max_depth` and `min_child_weight`. 
+
+```{r tree_specific, eval=F}
+hyper_grid2 <- expand.grid(
+  eta = 0.01,
+  max_depth = c(1, 3, 5, 7),
+  min_child_weight = c(5, 10, 15),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+for(i in seq_len(nrow(hyper_grid2))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid2$eta[i], 
+      max_depth = hyper_grid2$max_depth[i],
+      min_child_weight = hyper_grid2$min_child_weight[i]
+    ) 
+  )
+  hyper_grid2$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid2$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid2 %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+
+As in Section 12.3.3, we temporarily reduce the learning rate and increase the number of trees to see if performance improves. It does not (RMSE = 0.3229882).
+
+```{r temp.eta, eval=F}
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 8000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = 0.01, 
+      max_depth = 7,
+      min_child_weight = 5
+    ) 
+  )
+  temp.rmse <- min(m$evaluation_log$test_rmse_mean)
+  temp.trees <- m$best_iteration
+  
+temp.rmse
+temp.trees
+```
+
+Step 3: Explore stochastic GBM attributes
+
+In XGBoost, these parameters are `subsample`, `colsample_bytree`, and `colsample_bynode`.
+
+```{r stochastic, eval=F}
+hyper_grid3 <- expand.grid(
+  eta = 0.01,
+  max_depth = 7,
+  min_child_weight = 5,
+  subsample = c(0.5, 0.75, 1),
+  colsample_bytree = c(0.5, 0.75, 1),
+  colsample_bynode = c(0.5, 0.75, 1),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+for(i in seq_len(nrow(hyper_grid3))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid3$eta[i], 
+      max_depth = hyper_grid3$max_depth[i],
+      min_child_weight = hyper_grid3$min_child_weight[i],
+      subsample = hyper_grid3$subsample[i],
+      colsample_bytree = hyper_grid3$colsample_bytree[i],
+      colsample_bynode = hyper_grid3$colsample_bynode[i]
+    ) 
+  )
+  hyper_grid3$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid3$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid3 %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+
+Step 4: Explore Regularization Parameters
+
+This includes `gamma`, `alpha`, and `lambda`. 
+
+```{r regularization, eval=F}
+hyper_grid4 <- expand.grid(
+  eta = 0.01,
+  max_depth = 3, 
+  min_child_weight = 10,
+  subsample = 1, 
+  colsample_bytree = 1,
+  colsample_bynode = 0.75,
+  gamma = c(0, 1, 10, 100),
+  lambda = c(0, 1e-2, 0.1, 1, 100, 1000),
+  alpha = c(0, 1e-2, 0.1, 1, 100, 1000),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+# grid search
+for(i in seq_len(nrow(hyper_grid4))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid4$eta[i], 
+      max_depth = hyper_grid4$max_depth[i],
+      min_child_weight = hyper_grid4$min_child_weight[i],
+      subsample = hyper_grid4$subsample[i],
+      colsample_bytree = hyper_grid4$colsample_bytree[i],
+      colsample_bynode = hyper_grid4$colsample_bynode[i],
+      gamma = hyper_grid4$gamma[i], 
+      lambda = hyper_grid4$lambda[i], 
+      alpha = hyper_grid4$alpha[i]
+    ) 
+  )
+  hyper_grid4$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid4$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid4 %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+
+Step 5: Re-tune Learning Rate
+
+Fixing all the hyperparameters above, we now attempt to re-tune `eta`. Results not pictures, but 0.01 was still the optimal value.
+
+```{r eta2, eval=F}
+hyper_grid5 <- expand.grid(
+  eta = c(0.3, 0.1, 0.05, 0.01, 0.005),
+  max_depth = 3, 
+  min_child_weight = 10,
+  subsample = 1, 
+  colsample_bytree = 1,
+  colsample_bynode = 0.75,
+  gamma = 1,
+  lambda = 0.01,
+  alpha = 0.1,
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+for(i in seq_len(nrow(hyper_grid5))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid5$eta[i], 
+      max_depth = hyper_grid5$max_depth[i],
+      min_child_weight = hyper_grid5$min_child_weight[i],
+      subsample = hyper_grid5$subsample[i],
+      colsample_bytree = hyper_grid5$colsample_bytree[i],
+      colsample_bynode = hyper_grid5$colsample_bynode[i],
+      gamma = hyper_grid5$gamma[i], 
+      lambda = hyper_grid5$lambda[i], 
+      alpha = hyper_grid5$alpha[i]
+    ) 
+  )
+  hyper_grid5$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid5$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid5 %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+
+Step 6: Fit the Final Model
+
+```{r xgbfinal}
+# optimal parameter list
+params <- list(
+  eta = 0.01,
+  max_depth = 3, 
+  min_child_weight = 10,
+  subsample = 1, 
+  colsample_bytree = 1,
+  colsample_bynode = 0.75,
+  gamma = 1,
+  lambda = 0.01,
+  alpha = 0.1
+)
+
+# train final model
+xgb.fit.final <- xgboost(
+  params = params,
+  data = X,
+  label = Y,
+  nrounds = 650,
+  objective = "reg:squarederror",
+  verbose = 0
+)
+```
+
+#### Variable Importance Plot (XGBoost)
+```{r xgb_vip}
+vip(xgb.fit.final, num_features = 25, geom='point', aesthetics = list(color = "blue"))
+```
+
+### Conclusions
+
+The three models are quite close in performance for this data. The top performer is the random forest, which is an improvement of about 0.04% above the linear regression model. All that work for not much reward!!
+
+```{r xgb_pdp}
+xgboost.cfb.pred <- predict(xgb.fit.final, as.matrix(bake_cfb.test))
+converted.xgboost.prediction <- factor(ifelse(xgboost.cfb.pred > 0, "win", "loss"))
+confusionMatrix(converted.xgboost.prediction, converted.test)
+```
+
+Comparison among the models
+```{r comparison}
+#base.rmse
+base.rmse <- RMSE(test.predict, bake_cfb.test$Pts.Diff)
+#rf.rmse
+rf.rmse <- RMSE(rf.test.predict$predictions, bake_cfb.test$Pts.Diff)
+#xgboost.rmse
+xgboost.rmse <- RMSE(xgboost.cfb.pred, bake_cfb.test$Pts.Diff)
+
+print(paste0("The Base Model (multiple linear regression) RMSE is equal to ", round(base.rmse,3)))
+print(paste0("The Random Forest RMSE is equal to ", round(rf.rmse,3)))
+print(paste0("The XGBoost RMSE is equal to ", round(xgboost.rmse,3)))
+```
