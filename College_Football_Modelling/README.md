@@ -1,7 +1,7 @@
 Predictive Modeling with Linear Regression, Random Forests and XGBoost
 ===================================================
 ### Introduction
-In this notebook I compared the performance of three models on the predicting the Winnning team in College Football Bowl. The project is organized as follows: 
+In this notebook I compared the performance of three models on the predicting the Winnning team in College Football Bowl using R. The project is organized as follows: 
  - Part 1 - Data Preparation, Wrangling and Preprocessing
  - Part 2 - Base model (Linear Regression)
  - Part 3 - Random Forest Model
