@@ -1,0 +1,124 @@
+---
+title: "NFL Web Scraping"
+author: Igor Aboim 
+output:
+  md_document:
+    variant: markdown_github
+---
+### Web Scraping 2019 NFL game logs
+
+In this project there is an example of web scraping using R (robotstxt and rvest).
+
+Loading Packages
+
+```{r}
+library(robotstxt)
+library(rvest)
+library(stringr)
+library(plyr)
+library(tidyverse)
+```
+
+Confirming using robotstxt that it is acceptable to scrape from the website.
+
+```{r}
+base_url = "https://www.pro-football-reference.com"
+paths_allowed(base_url)
+```
+
+Writing a script that will output the links to game log data for all 30 teams. As an example, the link for the Dallas Cowboys is https://www.pro-football-reference.com/teams/dal/2019.htm.
+
+```{r}
+####Modify file paths to get game logs
+pages <- read_html(file.path(base_url)) %>%
+  html_nodes("#teams .left a") %>%
+  html_attr("href") %>%
+  file.path(base_url, .) %>%
+  str_replace("2020", "2019") %>%
+  str_replace(".htm", "/gamelog/")
+
+pages
+```
+
+Writing a script that will grab the game log data for a specific team and its respective opponent.
+
+```{r}
+gamelog.temp <- read_html(pages[1]) %>%
+  html_nodes("#gamelog2019") %>%
+  html_table(header=T)
+gamelog.temp <- gamelog.temp[[1]]
+opp.gamelog.temp <- read_html(pages[1]) %>%
+  html_nodes("#gamelog_opp2019") %>%
+  html_table(header=T)
+opp.gamelog.temp <- opp.gamelog.temp[[1]]
+```
+
+Cleaning up the data - remove redundant rows, ensure column names don’t include special characters, ensure all numeric columns are actually numeric.
+
+```{r, warning=FALSE}
+colnames(gamelog.temp) <- c("week", "day", "date", "boxscore_word", "game_outcome", "overtime", "game_location", "opp", "points_scored", "points_allowed", "pass.cmp", "pass.att", "pass.yds", "pass.TD", "pass.int", "pass.sk", "pass.yds", "pass.Y/A", "pass.NY/A", "pass.cmp%", "pass.rate", "rush.att", "rush.yds", "rush.Y/A", "rush.TD", "FGM", "FGA","XPM", "XPA", "punt.pnt", "punt.yds", "3Dconv", "3DAtt", "4DConv", "4DAtt", "ToP")
+colnames(opp.gamelog.temp) <- c("week", "day", "date", "boxscore_word", "game_outcome", "overtime", "game_location", "opp", "points_scored", "points_allowed", "opp.pass.cmp", "opp.pass.att", "opp.pass.yds", "opp.pass.TD", "opp.pass.int", "opp.pass.sk", "opp.pass.yds", "opp.pass.Y/A", "opp.pass.NY/A", "opp.pass.cmp%", "opp.pass.rate", "opp.rush.att", "opp.rush.yds", "opp.rush.Y/A", "opp.rush.TD", "opp.FGM", "opp.FGA","opp.XPM", "opp.XPA", "opp.punt.pnt", "opp.punt.yds", "opp.3Dconv", "opp.3DAtt", "opp.4DConv", "opp.4DAtt", "opp.ToP")
+
+gamelog.temp <- gamelog.temp[-1,]
+gamelog.temp[,c(11:25)] <- sapply(gamelog.temp[,c(9:35)], as.numeric)
+gamelog.temp$team <- str_sub(pages[1], 47, 49)
+
+opp.gamelog.temp <- opp.gamelog.temp[-1,]
+opp.gamelog.temp[,c(11:25)] <- sapply(opp.gamelog.temp[,c(9:35)], as.numeric)
+opp.gamelog.temp$team <- str_sub(pages[1], 47, 49)
+```
+
+Concatenating Gamelog and Opposition Gamelog dataframes
+
+```{r, warning=FALSE, message=FALSE}
+nwe_gamelog <- join(gamelog.temp, opp.gamelog.temp,type="full")
+head(nwe_gamelog)
+```
+
+Systematically collecting all game logs for all the teams.
+
+```{r, warning=FALSE, message=FALSE}
+####First, create a placeholder for each team's game logs
+gamelog.team <- list()
+
+####Function
+for(i in 1:length(pages)){
+  
+  gamelog.temp <- read_html(pages[i]) %>%
+    html_nodes("#gamelog2019") %>%
+    html_table(header=T)
+  gamelog.temp <- gamelog.temp[[1]]
+  opp.gamelog.temp <- read_html(pages[i]) %>%
+    html_nodes("#gamelog_opp2019") %>%
+    html_table(header=T)
+  opp.gamelog.temp <- opp.gamelog.temp[[1]]
+  
+  colnames(gamelog.temp) <- c("week", "day", "date", "boxscore_word", "game_outcome", "overtime", "game_location", "opp", "points_scored", "points_allowed", "pass.cmp", "pass.att", "pass.yds", "pass.TD", "pass.int", "pass.sk", "pass.yds", "pass.Y/A", "pass.NY/A", "pass.cmp%", "pass.rate", "rush.att", "rush.yds", "rush.Y/A", "rush.TD", "FGM", "FGA","XPM", "XPA", "punt.pnt", "punt.yds", "3Dconv", "3DAtt", "4DConv", "4DAtt", "ToP")
+  colnames(opp.gamelog.temp) <- c("week", "day", "date", "boxscore_word", "game_outcome", "overtime", "game_location", "opp", "points_scored", "points_allowed", "opp.pass.cmp", "opp.pass.att", "opp.pass.yds", "opp.pass.TD", "opp.pass.int", "opp.pass.sk", "opp.pass.yds", "opp.pass.Y/A", "opp.pass.NY/A", "opp.pass.cmp%", "opp.pass.rate", "opp.rush.att", "opp.rush.yds", "opp.rush.Y/A", "opp.rush.TD", "opp.FGM", "opp.FGA","opp.XPM", "opp.XPA", "opp.punt.pnt", "opp.punt.yds", "opp.3Dconv", "opp.3DAtt", "opp.4DConv", "opp.4DAtt", "opp.ToP")
+  
+  gamelog.temp <- gamelog.temp[-1,]
+  gamelog.temp[,c(11:25)] <- sapply(gamelog.temp[,c(9:35)], as.numeric)
+  gamelog.temp$team <- str_sub(pages[i], 47, 49)
+  
+  opp.gamelog.temp <- opp.gamelog.temp[-1,]
+  opp.gamelog.temp[,c(11:25)] <- sapply(opp.gamelog.temp[,c(9:35)], as.numeric)
+  opp.gamelog.temp$team <- str_sub(pages[i], 47, 49)
+  
+  gamelog <- join(gamelog.temp, opp.gamelog.temp,type="full")
+  gamelog.team[[i]] <- gamelog
+}
+
+```
+
+Compilation of all game logs into a single data frame.
+
+```{r}
+gamelogs.all <- rbind.fill(gamelog.team)
+```
+
+Creating the final data set “nfl2019_gamelogs”. Output of the results for str(nfl2019_gamelogs)
+
+```{r}
+nfl2019_gamelogs <- gamelogs.all
+str(nfl2019_gamelogs)
+```
